@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Travola Pantry</string>
+    <string name="title_activity_main">Travola Pantry</string>
+    <string name="package_name">app.travola.pantry</string>
+    <string name="custom_url_scheme">app.travola.pantry</string>
+</resources>

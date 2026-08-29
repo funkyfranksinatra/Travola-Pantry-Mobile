@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>Travola Pantry</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml" />
+<style>
+/* The Travola tokens, verbatim from the web apps, so the phone app and
+   the website read as one product. Dark only — this runs in walk-ins. */
+:root{
+  --bg:#0b0b0f; --panel:#18181d; --panel-up:#27272c;
+  --border:rgba(244,244,245,.07); --border-hi:rgba(244,244,245,.13);
+  --ink-50:#e4e4e7; --ink-200:#c4c4cc; --ink-400:#a1a1aa;
+  --ai:#818cf8; --ai-bg:rgba(129,140,248,.12);
+  --good:#52c794; --warn:#e0b063; --bad:#f27d7d;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--ink-50);
+  font:16px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif;
+  padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+.wrap{max-width:520px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:14px}
+.brand{display:flex;align-items:baseline;gap:10px;padding:6px 2px}
+.brand b{color:var(--ai);font-size:18px;letter-spacing:.02em}
+.brand span{font-family:ui-monospace,monospace;font-size:9px;letter-spacing:.2em;color:var(--ink-400)}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px}
+.label{font-family:ui-monospace,monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-400)}
+h1{font-size:24px;margin:4px 0 2px;letter-spacing:-.02em}
+p.note{color:var(--ink-400);font-size:13px;margin:4px 0 0}
+input,select{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  color:var(--ink-50);font-size:16px;padding:12px;outline:none;min-height:48px}
+input:focus{border-color:var(--ai)}
+.btn{display:block;width:100%;min-height:50px;border:none;border-radius:12px;font-size:16px;font-weight:650;
+  background:var(--ai);color:var(--bg);cursor:pointer}
+.btn[disabled]{opacity:.4}
+.btn.ghost{background:transparent;color:var(--ink-400);border:1px solid var(--border)}
+.chiprow{display:flex;gap:8px;flex-wrap:wrap}
+.chip{min-height:44px;padding:10px 14px;border-radius:10px;border:1px solid var(--border);
+  background:var(--panel);color:var(--ink-400);font-size:14px;font-weight:650;cursor:pointer}
+.chip.on{background:var(--ai-bg);border-color:rgba(129,140,248,.4);color:var(--ai)}
+.item{display:flex;align-items:center;gap:12px;padding:14px;border-bottom:1px solid var(--border)}
+.item:last-child{border-bottom:none}
+.item .nm{flex:1;min-width:0}
+.item .nm b{display:block;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .nm small{color:var(--ink-400);font-size:11px}
+.item input{width:104px;height:52px;text-align:right;font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
+.state{width:22px;text-align:center;font-size:15px}
+.state.q{color:var(--warn)} .state.s{color:var(--good)} .state.o{color:var(--warn)}
+.banner{border-radius:10px;padding:10px 14px;font-size:13px}
+.banner.warn{background:rgba(224,176,99,.1);border:1px solid rgba(224,176,99,.35);color:#eed3a5}
+.banner.err{background:rgba(242,125,125,.08);border:1px solid rgba(242,125,125,.3);color:var(--bad)}
+.banner.ok{background:rgba(82,199,148,.08);border:1px solid rgba(82,199,148,.3);color:var(--good)}
+.foot{position:sticky;bottom:8px;display:flex;gap:10px}
+.foot .btn{flex:1}
+.outnote{font-size:12px;color:var(--warn);padding:0 14px 12px}
+.hide{display:none!important}
+a.adv{color:var(--ink-400);font-size:12px;text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script>
+"use strict";
+// ─────────────────────────────────────────────────────────────────
+// Travola Pantry — the counting app.
+//
+// One file, no framework, because the whole job is: sign in, walk the
+// shelves, type numbers, submit. The offline model is the reason this
+// app exists as a native bundle rather than a bookmark:
+//
+//   START needs signal    (creates the count, caches rooms + items)
+//   COUNTING does not     (entries queue in localStorage)
+//   SUBMIT flushes        (queued lines drain first, then submit; if
+//                          offline, the submit itself queues and fires
+//                          on the next 'online' event)
+//
+// A dead spot in the walk-in therefore costs nothing — which is the
+// difference between a count that happens and one that does not.
+// ─────────────────────────────────────────────────────────────────
+
+const LS = {
+  get(key, fallback){ try{ const v = localStorage.getItem(key); return v==null?fallback:JSON.parse(v);}catch{ return fallback; } },
+  set(key, value){ try{ localStorage.setItem(key, JSON.stringify(value)); }catch{} },
+  del(key){ try{ localStorage.removeItem(key); }catch{} },
+};
+
+const state = {
+  server: LS.get("server", "https://pantry.travola.app"),
+  token: LS.get("token", null),
+  restaurant: LS.get("restaurant", null),
+  session: LS.get("session", null), // {countId, type, countedBy, rooms, items, entries:{itemId:qty}, statuses:{itemId:'queued'|'saved'|'outlier'}, prev:{itemId:qty}, roomIdx, pendingSubmit}
+};
+
+const $ = (html) => { const t=document.createElement("template"); t.innerHTML=html.trim(); return t.content.firstChild; };
+const app = document.getElementById("app");
+
+async function api(path, options={}){
+  const headers = { "content-type": "application/json", ...(state.token?{ "authorization": "Bearer "+state.token }:{}) };
+  const response = await fetch(state.server + path, { ...options, headers });
+  const body = await response.json().catch(()=>({}));
+  if (response.status === 401 && state.token) { state.token=null; LS.del("token"); render(); throw new Error("Signed out — sign in again."); }
+  if (!response.ok) throw new Error(body.error || "That did not work.");
+  return body;
+}
+
+function save(){ LS.set("session", state.session); }
+
+// ── Offline queue ────────────────────────────────────────────────
+// Every entry writes locally FIRST, then tries the network. The queue
+// is per-item (latest value wins), so re-counting a shelf offline never
+// stacks duplicates.
+async function pushLine(itemId){
+  const s = state.session; if(!s) return;
+  const quantity = Number(s.entries[itemId]);
+  if(!Number.isFinite(quantity) || quantity<0) return;
+  s.statuses[itemId]="queued"; save(); paintState(itemId);
+  try{
+    const body = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"line",countId:s.countId,itemId,quantity})});
+    s.statuses[itemId]= body.outlier ? "outlier" : "saved";
+    if(body.outlier) s.prev[itemId]=body.previous;
+    save(); paintState(itemId);
+  }catch(err){ /* stays queued; the flush will retry */ }
+}
+
+async function flushQueue(){
+  const s = state.session; if(!s) return true;
+  let clean = true;
+  for(const itemId of Object.keys(s.statuses)){
+    if(s.statuses[itemId]!=="queued") continue;
+    try{
+      const body = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"line",countId:s.countId,itemId,quantity:Number(s.entries[itemId])})});
+      s.statuses[itemId]= body.outlier ? "outlier" : "saved";
+      if(body.outlier) s.prev[itemId]=body.previous;
+    }catch{ clean=false; }
+  }
+  save();
+  return clean;
+}
+
+async function trySubmit(){
+  const s = state.session; if(!s) return;
+  const flushed = await flushQueue();
+  if(!flushed){ s.pendingSubmit=true; save(); render(); return; }
+  try{
+    await api("/api/counts",{method:"POST",body:JSON.stringify({action:"submit",countId:s.countId})});
+    state.session=null; LS.del("session");
+    render("submitted");
+  }catch(err){
+    if(!navigator.onLine){ s.pendingSubmit=true; save(); render(); }
+    else { render(null, err.message); }
+  }
+}
+
+window.addEventListener("online", async ()=>{
+  const s = state.session;
+  if(s){ const done = await flushQueue(); render(); if(s.pendingSubmit && done) trySubmit(); }
+});
+
+// ── Screens ──────────────────────────────────────────────────────
+
+function brand(){ return `<div class="brand"><b>Travola</b><span>PANTRY</span></div>`; }
+
+function renderSignIn(error){
+  app.innerHTML = brand()+`
+  <div class="card">
+    <span class="label">Sign in</span>
+    <h1>Count the shelves</h1>
+    <p class="note">The same restaurant name and code as the floor manager.</p>
+  </div>
+  ${error?`<div class="banner err">${error}</div>`:""}
+  <div class="card" style="display:flex;flex-direction:column;gap:12px">
+    <div><span class="label">Restaurant name</span><input id="f-name" autocomplete="off" /></div>
+    <div><span class="label">Restaurant code</span><input id="f-code" type="password" inputmode="numeric" autocomplete="off" /></div>
+    <button class="btn" id="f-go">Sign in</button>
+    <a class="adv" id="f-adv">Server: ${state.server.replace(/^https?:\/\//,"")}</a>
+  </div>`;
+  document.getElementById("f-adv").onclick = ()=>{
+    const value = prompt("API server", state.server);
+    if(value){ state.server=value.replace(/\/$/,""); LS.set("server",state.server); render(); }
+  };
+  document.getElementById("f-go").onclick = async ()=>{
+    const name=document.getElementById("f-name").value, code=document.getElementById("f-code").value;
+    try{
+      const body = await api("/api/auth",{method:"POST",body:JSON.stringify({name,passcode:code,client:"mobile"})});
+      state.token=body.token; state.restaurant=body.restaurant;
+      LS.set("token",state.token); LS.set("restaurant",state.restaurant);
+      render();
+    }catch(err){ renderSignIn(err.message); }
+  };
+}
+
+function renderHome(flash, error){
+  app.innerHTML = brand()+`
+  <div class="card">
+    <span class="label">${state.restaurant?.name ?? ""}</span>
+    <h1>Start a count</h1>
+    <p class="note">Starting needs signal — it fetches the shelves. Counting after that works with none: entries queue on the phone and send themselves when signal returns.</p>
+  </div>
+  ${flash==="submitted"?`<div class="banner ok">Submitted for approval. Nothing else to do.</div>`:""}
+  ${error?`<div class="banner err">${error}</div>`:""}
+  <div class="card" style="display:flex;flex-direction:column;gap:12px">
+    <div><span class="label">Your name</span><input id="h-name" value="${LS.get("countedBy","")}" placeholder="Shown to whoever approves" /></div>
+    <div><span class="label">What kind</span>
+      <div class="chiprow" id="h-type">
+        <button class="chip on" data-t="spot">Spot</button>
+        <button class="chip" data-t="key">Key items</button>
+        <button class="chip" data-t="full">Full</button>
+      </div>
+    </div>
+    <button class="btn" id="h-go">Start counting</button>
+    <button class="btn ghost" id="h-out">Sign out</button>
+  </div>`;
+  let type="spot";
+  document.getElementById("h-type").onclick=(event)=>{
+    const chip=event.target.closest(".chip"); if(!chip) return;
+    type=chip.dataset.t;
+    for(const el of event.currentTarget.children) el.classList.toggle("on", el===chip);
+  };
+  document.getElementById("h-out").onclick=()=>{ state.token=null; LS.del("token"); render(); };
+  document.getElementById("h-go").onclick=async()=>{
+    const countedBy=document.getElementById("h-name").value.trim()||"staff";
+    LS.set("countedBy",countedBy);
+    try{
+      const started = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"start",type,countedBy})});
+      const [roomsBody,itemsBody] = await Promise.all([api("/api/rooms"),api("/api/items")]);
+      const items=(itemsBody.items||[]).filter((item)=> type!=="key"||item.isKeyItem);
+      const rooms=(roomsBody.rooms||[]).filter((room)=> items.some((item)=>item.roomId===room.id));
+      if(!rooms.length){ renderHome(null,"No items to count yet — set up rooms and items in Pantry first."); return; }
+      state.session={countId:started.id,type,countedBy,rooms,items,entries:{},statuses:{},prev:{},roomIdx:0,pendingSubmit:false};
+      save(); render();
+    }catch(err){ renderHome(null, err.message); }
+  };
+}
+
+function paintState(itemId){
+  const el=document.querySelector(`[data-state="${itemId}"]`); if(!el) return;
+  const status=state.session?.statuses[itemId];
+  el.className="state "+(status==="queued"?"q":status==="outlier"?"o":status==="saved"?"s":"");
+  el.textContent= status==="queued"?"↻": status==="saved"?"✓": status==="outlier"?"!":"";
+  const note=document.querySelector(`[data-outnote="${itemId}"]`);
+  if(note) note.classList.toggle("hide", status!=="outlier");
+  // The submit button was rendered before the first entry existed; it
+  // has to wake up as entries land, not only on a full re-render.
+  const submit=document.getElementById("c-submit");
+  if(submit && state.session){
+    const done=Object.keys(state.session.statuses).length;
+    submit.disabled = done===0;
+    submit.textContent = "Submit "+(done||"");
+  }
+}
+
+function renderCount(){
+  const s=state.session;
+  const room=s.rooms[Math.min(s.roomIdx,s.rooms.length-1)];
+  const roomItems=s.items.filter((item)=>item.roomId===room.id);
+  const done=Object.keys(s.statuses).length;
+  const queued=Object.values(s.statuses).filter((v)=>v==="queued").length;
+
+  app.innerHTML = brand()+`
+  <div class="card">
+    <span class="label">Counting · ${done} of ${s.items.length}${navigator.onLine?"":" · offline"}</span>
+    <h1>${room.name}</h1>
+    <p class="note">Walk the shelves in order. ${navigator.onLine?"Every entry saves as you go.":"No signal — entries are queued on this phone and send themselves when it returns."}</p>
+  </div>
+  ${queued&&navigator.onLine?`<div class="banner warn">${queued} entr${queued===1?"y":"ies"} still syncing…</div>`:""}
+  ${s.pendingSubmit?`<div class="banner warn">Will submit the moment signal returns — keep the app open.</div>`:""}
+  ${s.rooms.length>1?`<div class="chiprow">${s.rooms.map((r,index)=>`<button class="chip ${index===s.roomIdx?"on":""}" data-r="${index}">${r.name}</button>`).join("")}</div>`:""}
+  <div class="card" style="padding:0">
+    ${roomItems.map((item)=>`
+      <div class="item">
+        <div class="nm"><b>${item.name}</b><small>${item.countUnit}</small></div>
+        <input inputmode="decimal" data-item="${item.id}" value="${s.entries[item.id]??""}" placeholder="—" />
+        <div class="state" data-state="${item.id}"></div>
+      </div>
+      <div class="outnote hide" data-outnote="${item.id}">Last approved count was <span data-prev="${item.id}"></span> — saved anyway, check it is not a slip.</div>
+    `).join("")}
+  </div>
+  <div class="foot">
+    <button class="btn ghost" id="c-later">Finish later</button>
+    <button class="btn" id="c-submit" ${done?"":"disabled"}>Submit ${done||""}</button>
+  </div>`;
+
+  for(const item of roomItems){ paintState(item.id); const prev=document.querySelector(`[data-prev="${item.id}"]`); if(prev) prev.textContent=s.prev[item.id]??""; }
+  app.querySelectorAll(".chip[data-r]").forEach((chip)=>{ chip.onclick=()=>{ s.roomIdx=Number(chip.dataset.r); save(); renderCount(); }; });
+  app.querySelectorAll("input[data-item]").forEach((input)=>{
+    input.addEventListener("input",()=>{ s.entries[input.dataset.item]=input.value; save(); });
+    input.addEventListener("blur",()=>{ if(input.value.trim()!=="") pushLine(input.dataset.item); });
+  });
+  document.getElementById("c-later").onclick=()=>{ render("paused"); };
+  document.getElementById("c-submit").onclick=()=>{ app.querySelectorAll("input[data-item]").forEach((input)=>{ if(input.value.trim()!=="" && !s.statuses[input.dataset.item]) { s.entries[input.dataset.item]=input.value; } }); trySubmit(); };
+}
+
+function render(flash, error){
+  if(!state.token) return renderSignIn(error);
+  if(state.session) return renderCount();
+  return renderHome(flash, error);
+}
+render();
+</script>
+</body>
+</html>
