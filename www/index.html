@@ -44,6 +44,11 @@ input:focus{border-color:var(--ai)}
 .item .nm b{display:block;font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .item .nm small{color:var(--ink-400);font-size:11px}
 .item input{width:104px;height:52px;text-align:right;font-size:20px;font-weight:650;font-variant-numeric:tabular-nums}
+.item input.half{width:74px;font-size:18px}
+.item .box{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.item .box small{color:var(--ink-400);font-size:10px}
+.item .plus{color:var(--ink-400);padding-bottom:16px}
+.sumnote{font-size:12px;color:var(--ink-200);text-align:right;font-variant-numeric:tabular-nums;padding:0 52px 12px 14px;margin-top:-8px}
 .state{width:22px;text-align:center;font-size:15px}
 .state.q{color:var(--warn)} .state.s{color:var(--good)} .state.o{color:var(--warn)}
 .banner{border-radius:10px;padding:10px 14px;font-size:13px}
@@ -105,14 +110,37 @@ async function api(path, options={}){
 
 function save(){ LS.set("session", state.session); }
 
+// ── Case + loose entry ───────────────────────────────────────────
+// Real shelves hold "2 unopened cases and 3 loose lb". Items whose
+// purchase unit differs from their count unit get two boxes, and the
+// arithmetic happens HERE — not in the counter's head, which is where
+// 40-for-4 slips are born. Entries are {c, l} (cases, loose); sessions
+// saved by an older app version hold plain strings and normalise up.
+function entryOf(itemId){
+  const raw = state.session?.entries[itemId];
+  if(raw==null) return {c:"",l:""};
+  if(typeof raw==="object") return {c:raw.c??"",l:raw.l??""};
+  return {c:"",l:String(raw)};
+}
+function isDual(item){ return Number(item.countPerPurchase)>1 && item.purchaseUnit && item.purchaseUnit!==item.countUnit; }
+function entryTotal(item, entry){
+  const c=(entry.c??"").trim(), l=(entry.l??"").trim();
+  if(c==="" && l==="") return null;
+  const caseQty=c===""?0:Number(c), looseQty=l===""?0:Number(l);
+  if(!Number.isFinite(caseQty)||!Number.isFinite(looseQty)||caseQty<0||looseQty<0) return null;
+  return caseQty*Number(item.countPerPurchase||1)+looseQty;
+}
+function itemById(itemId){ return state.session?.items.find((item)=>item.id===itemId); }
+
 // ── Offline queue ────────────────────────────────────────────────
 // Every entry writes locally FIRST, then tries the network. The queue
 // is per-item (latest value wins), so re-counting a shelf offline never
 // stacks duplicates.
 async function pushLine(itemId){
   const s = state.session; if(!s) return;
-  const quantity = Number(s.entries[itemId]);
-  if(!Number.isFinite(quantity) || quantity<0) return;
+  const item = itemById(itemId); if(!item) return;
+  const quantity = entryTotal(item, entryOf(itemId));
+  if(quantity==null) return;
   s.statuses[itemId]="queued"; save(); paintState(itemId);
   try{
     const body = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"line",countId:s.countId,itemId,quantity})});
@@ -127,8 +155,11 @@ async function flushQueue(){
   let clean = true;
   for(const itemId of Object.keys(s.statuses)){
     if(s.statuses[itemId]!=="queued") continue;
+    const item = itemById(itemId); if(!item) continue;
+    const quantity = entryTotal(item, entryOf(itemId));
+    if(quantity==null) continue;
     try{
-      const body = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"line",countId:s.countId,itemId,quantity:Number(s.entries[itemId])})});
+      const body = await api("/api/counts",{method:"POST",body:JSON.stringify({action:"line",countId:s.countId,itemId,quantity})});
       s.statuses[itemId]= body.outlier ? "outlier" : "saved";
       if(body.outlier) s.prev[itemId]=body.previous;
     }catch{ clean=false; }
@@ -266,28 +297,63 @@ function renderCount(){
   ${s.pendingSubmit?`<div class="banner warn">Will submit the moment signal returns — keep the app open.</div>`:""}
   ${s.rooms.length>1?`<div class="chiprow">${s.rooms.map((r,index)=>`<button class="chip ${index===s.roomIdx?"on":""}" data-r="${index}">${r.name}</button>`).join("")}</div>`:""}
   <div class="card" style="padding:0">
-    ${roomItems.map((item)=>`
+    ${roomItems.map((item)=>{
+      const entry=entryOf(item.id);
+      if(isDual(item)) return `
       <div class="item">
-        <div class="nm"><b>${item.name}</b><small>${item.countUnit}</small></div>
-        <input inputmode="decimal" data-item="${item.id}" value="${s.entries[item.id]??""}" placeholder="—" />
+        <div class="nm"><b>${item.name}</b><small>${item.countPerPurchase} ${item.countUnit} / ${item.purchaseUnit}</small></div>
+        <div class="box"><input class="half" inputmode="decimal" data-c="${item.id}" value="${entry.c}" placeholder="—" /><small>${item.purchaseUnit}s</small></div>
+        <div class="plus">+</div>
+        <div class="box"><input class="half" inputmode="decimal" data-l="${item.id}" value="${entry.l}" placeholder="—" /><small>${item.countUnit} loose</small></div>
         <div class="state" data-state="${item.id}"></div>
       </div>
-      <div class="outnote hide" data-outnote="${item.id}">Last approved count was <span data-prev="${item.id}"></span> — saved anyway, check it is not a slip.</div>
-    `).join("")}
+      <div class="sumnote hide" data-sum="${item.id}"></div>
+      <div class="outnote hide" data-outnote="${item.id}">Last approved count was <span data-prev="${item.id}"></span> — saved anyway, check it is not a slip.</div>`;
+      return `
+      <div class="item">
+        <div class="nm"><b>${item.name}</b><small>${item.countUnit}</small></div>
+        <input inputmode="decimal" data-l="${item.id}" value="${entry.l}" placeholder="—" />
+        <div class="state" data-state="${item.id}"></div>
+      </div>
+      <div class="outnote hide" data-outnote="${item.id}">Last approved count was <span data-prev="${item.id}"></span> — saved anyway, check it is not a slip.</div>`;
+    }).join("")}
   </div>
   <div class="foot">
     <button class="btn ghost" id="c-later">Finish later</button>
     <button class="btn" id="c-submit" ${done?"":"disabled"}>Submit ${done||""}</button>
   </div>`;
 
-  for(const item of roomItems){ paintState(item.id); const prev=document.querySelector(`[data-prev="${item.id}"]`); if(prev) prev.textContent=s.prev[item.id]??""; }
+  function paintSum(itemId){
+    const el=document.querySelector(`[data-sum="${itemId}"]`); if(!el) return;
+    const item=itemById(itemId); const entry=entryOf(itemId);
+    const total=entryTotal(item, entry);
+    const show= total!=null && (entry.c??"").trim()!=="";
+    el.classList.toggle("hide", !show);
+    if(show) el.textContent=`= ${total} ${item.countUnit} on the shelf`;
+  }
+  for(const item of roomItems){ paintState(item.id); paintSum(item.id); const prev=document.querySelector(`[data-prev="${item.id}"]`); if(prev) prev.textContent=s.prev[item.id]??""; }
   app.querySelectorAll(".chip[data-r]").forEach((chip)=>{ chip.onclick=()=>{ s.roomIdx=Number(chip.dataset.r); save(); renderCount(); }; });
-  app.querySelectorAll("input[data-item]").forEach((input)=>{
-    input.addEventListener("input",()=>{ s.entries[input.dataset.item]=input.value; save(); });
-    input.addEventListener("blur",()=>{ if(input.value.trim()!=="") pushLine(input.dataset.item); });
+  app.querySelectorAll("input[data-c],input[data-l]").forEach((input)=>{
+    const itemId=input.dataset.c||input.dataset.l;
+    const field=input.dataset.c?"c":"l";
+    input.addEventListener("input",()=>{ const entry=entryOf(itemId); entry[field]=input.value; s.entries[itemId]=entry; save(); paintSum(itemId); });
+    // Blur fires when hopping between an item's two boxes; pushLine is
+    // an idempotent upsert, so the extra round-trip is harmless.
+    input.addEventListener("blur",()=>{ pushLine(itemId); });
   });
   document.getElementById("c-later").onclick=()=>{ render("paused"); };
-  document.getElementById("c-submit").onclick=()=>{ app.querySelectorAll("input[data-item]").forEach((input)=>{ if(input.value.trim()!=="" && !s.statuses[input.dataset.item]) { s.entries[input.dataset.item]=input.value; } }); trySubmit(); };
+  document.getElementById("c-submit").onclick=()=>{
+    // Sweep anything typed but never blurred before submitting, and
+    // queue it so the flush inside trySubmit actually sends it.
+    app.querySelectorAll("input[data-c],input[data-l]").forEach((input)=>{
+      const itemId=input.dataset.c||input.dataset.l;
+      if(input.value.trim()!=="" && !s.statuses[itemId]){
+        const entry=entryOf(itemId); entry[input.dataset.c?"c":"l"]=input.value; s.entries[itemId]=entry;
+        if(entryTotal(itemById(itemId), entry)!=null) s.statuses[itemId]="queued";
+      }
+    });
+    save(); trySubmit();
+  };
 }
 
 function render(flash, error){
